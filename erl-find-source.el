@@ -57,7 +57,9 @@ integer."
 If MFA is nil then return nil.
 If only MOD is nil then return FUN/ARITY."
   (if mfa
-      (destructuring-bind (m f a) mfa
+      (let ((m (car mfa))
+            (f (cadr mfa))
+            (a (caadr mfa)))
         (if m (format "%s:%s/%S" m f a) (format "%s/%S" f a)))))
 
 (defun erlfs-parse-mfa (string &optional default-module)
@@ -90,36 +92,16 @@ If not module-qualified then use DEFAULT-MODULE."
 (defun erlfs-arity-at-point ()
   "Get the number of arguments in a function reference.
 Should be called with point directly before the opening ( or /."
-  ;; Adapted from erlang-get-function-arity.
   (save-excursion
     (cond ((looking-at "/")
-           ;; form is /<n>, like the /2 in foo:bar/2
+   ;; form is /<n>, like the /2 in foo:bar/2
            (forward-char)
            (let ((start (point)))
              (if (re-search-forward "[0-9]+" nil t)
                  (ignore-errors (car (read-from-string (match-string 0)))))))
-          ((looking-at "[\n\r ]*(")
-           (goto-char (match-end 0))
-           (condition-case nil
-               (let ((res 0)
-                     (cont t))
-                 (while cont
-                   (cond ((eobp)
-                          (setq res nil)
-                          (setq cont nil))
-                         ((looking-at "\\s *)")
-                          (setq cont nil))
-                         ((looking-at "\\s *\\($\\|%\\)")
-                          (forward-line 1))
-                         ((looking-at "\\s *,")
-                          (incf res)
-                          (goto-char (match-end 0)))
-                         (t
-                          (when (zerop res)
-                            (incf res))
-                          (forward-sexp 1))))
-                 res)
-             (error nil))))))
+          (t
+           (forward-char)
+           (erlang-get-arity)))))
 
 ;;;; Definition finding
 
