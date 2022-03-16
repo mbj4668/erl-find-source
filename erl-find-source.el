@@ -44,10 +44,11 @@ integer."
          (mfa (if (or (null mfa-at-point)
                       current-prefix-arg
                       erlfs-tags-compliant)
-                  (erlfs-parse-mfa 
-		   (read-string 
-		    "Function reference: "
-		    (if current-prefix-arg nil (erlfs-format-mfa mfa-at-point))))
+                  (erlfs-parse-mfa
+                   (read-string
+                    "Function reference: "
+                    (if current-prefix-arg nil
+                      (erlfs-format-mfa mfa-at-point))))
                 mfa-at-point)))
     mfa))
 
@@ -56,9 +57,7 @@ integer."
 If MFA is nil then return nil.
 If only MOD is nil then return FUN/ARITY."
   (if mfa
-      (let ((m (car mfa))
-            (f (cadr mfa))
-            (a (caadr mfr)))
+      (destructuring-bind (m f a) mfa
         (if m (format "%s:%s/%S" m f a) (format "%s/%S" f a)))))
 
 (defun erlfs-parse-mfa (string &optional default-module)
@@ -81,26 +80,46 @@ If not module-qualified then use DEFAULT-MODULE."
   (save-excursion
     (erlfs-goto-end-of-call-name)
     (let ((arity (erlfs-arity-at-point))
-	  (mf (erlang-get-function-under-point)))
+          (mf (erlang-get-function-under-point)))
       (if (null mf)
-	  nil
+          nil
         (let ((m (car mf))
-              (f (cadr mf))) 
+              (f (cadr mf)))
           (list (or m default-module) f arity))))))
 
 (defun erlfs-arity-at-point ()
   "Get the number of arguments in a function reference.
 Should be called with point directly before the opening ( or /."
+  ;; Adapted from erlang-get-function-arity.
   (save-excursion
     (cond ((looking-at "/")
-	   ;; form is /<n>, like the /2 in foo:bar/2
-	   (forward-char)
-	   (let ((start (point)))
-	     (if (re-search-forward "[0-9]+" nil t)
-                 (ignore-errors (car (read-from-string (match-string 0)))))))
-          (t
+           ;; form is /<n>, like the /2 in foo:bar/2
            (forward-char)
-           (erlang-get-arity)))))
+           (let ((start (point)))
+             (if (re-search-forward "[0-9]+" nil t)
+                 (ignore-errors (car (read-from-string (match-string 0)))))))
+          ((looking-at "[\n\r ]*(")
+           (goto-char (match-end 0))
+           (condition-case nil
+               (let ((res 0)
+                     (cont t))
+                 (while cont
+                   (cond ((eobp)
+                          (setq res nil)
+                          (setq cont nil))
+                         ((looking-at "\\s *)")
+                          (setq cont nil))
+                         ((looking-at "\\s *\\($\\|%\\)")
+                          (forward-line 1))
+                         ((looking-at "\\s *,")
+                          (incf res)
+                          (goto-char (match-end 0)))
+                         (t
+                          (when (zerop res)
+                            (incf res))
+                          (forward-sexp 1))))
+                 res)
+             (error nil))))))
 
 ;;;; Definition finding
 
@@ -134,12 +153,12 @@ default.)"
   (interactive)
   (unless (ring-empty-p erlfs-find-history-ring)
     (let* ((marker (ring-remove erlfs-find-history-ring))
-	   (buffer (marker-buffer marker)))
+           (buffer (marker-buffer marker)))
       (if (buffer-live-p buffer)
-	  (progn (switch-to-buffer buffer)
-		 (goto-char (marker-position marker)))
-	;; If this buffer was deleted, recurse to try the next one
-	(erlfs-find-source-unwind)))))
+          (progn (switch-to-buffer buffer)
+                 (goto-char (marker-position marker)))
+        ;; If this buffer was deleted, recurse to try the next one
+        (erlfs-find-source-unwind)))))
 
 (defun erlfs-goto-end-of-call-name ()
   "Go to the end of the function or module:function at point."
@@ -164,10 +183,10 @@ default.)"
 When FUNCTION is specified, the point is moved to its start."
   ;; Add us to the history list
   (ring-insert-at-beginning erlfs-find-history-ring
-			    (copy-marker (point-marker)))
+                            (copy-marker (point-marker)))
   (if (equal module (erlang-get-module))
       (when function
-	(erlfs-search-function function arity))
+        (erlfs-search-function function arity))
     (let ((buf (concat module ".erl")))
       (if (erlfs-switch-to-module-buffer module)
           (when function
@@ -192,31 +211,33 @@ When FUNCTION is specified, the point is moved to its start."
                         (setq patterns (cdr patterns))))))
              found)))))
 
-(defun erlfs-search-function (function arity)
-  "Goto the definition of FUNCTION/ARITY in the current buffer."
-  (let ((origin (point))
-	(str (concat "\n" function "("))
-	(searching t))
-    (goto-char (point-min))
-    (while searching
-      (cond ((search-forward str nil t)
-	     (backward-char)
-	     (when (or (null arity)
-		       (eq (erlfs-arity-at-point) arity))
-	       (beginning-of-line)
-	       (setq searching nil)))
-	    (t
-	     (setq searching nil)
-	     (goto-char origin)
-	     (if arity
-		 (message "Couldn't find function %S/%S" function arity)
-                 ;; try another search w/o the arity
-                 ;(erlfs-search-function function nil)
-	       (message "Couldn't find function %S" function)))))))
+(defun erlfs-search-function (name arity &optional type)
+  "Goto the definition of NAME/ARITY in the current buffer.
+Value is non-nil if search is successful."
+  (let ((re (concat "^" (and type "-type\\s-*") (regexp-quote name) "\\s-*("))
+        found)
+    (save-excursion
+      (goto-char (point-min))
+      (while (and (not found)
+                  (let ((case-fold-search nil)) (re-search-forward re nil t)))
+        (backward-char)
+        (when (or (null arity) (eq (erlfs-arity-at-point) arity))
+          (setq found (line-beginning-position)))))
+    (cond
+     (found (goto-char found))
+     ((and arity (not type))
+      (message "Function %s/%s not found; ignoring arity..."
+               name arity)
+      (erlfs-search-function name nil nil))
+     ((not type)
+      (message "Searching type definition...")
+      (erlfs-search-function name 0 t))
+     (t (message "Couldn't find function or type %S" name)
+        nil))))
 
 (defun erlfs-read-symbol-or-nil (prompt)
   "Read a symbol, or NIL on empty input."
   (let ((s (read-string prompt)))
     (if (string= s "")
-	nil
+        nil
       (intern s))))
