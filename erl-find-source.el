@@ -1,6 +1,6 @@
 ;;; This module implements find source for Erlang programs.
 ;;; Most of the code is copied from distel by Luke Gorrie,
-;;; but it doesn't use an erlang node.
+;;; but this version doesn't use an erlang node.
 
 ;;; Usage example:
 ;;;
@@ -12,6 +12,8 @@
 ;;;  (local-set-key "\e*" 'erlfs-find-source-unwind))
 ;;;  ;; Some prefer M-, for pop
 ;;;  (local-set-key "\e," 'erlfs-find-source-unwind))
+;;;  ;; I use M-? to find callers of the current function.
+;;;  (local-set-key "\e?" 'erlfs-find-callers))
 ;;;
 ;;; (add-hook 'erlang-mode-hook 'my-erlang-mode-hook)
 
@@ -29,7 +31,7 @@
   :group 'erlfs)
 
 (defcustom erlfs-search-patterns '("../../*/src/")
-  "List of directory patterns to search for erlang modules"
+  "List of directory patterns to search for erlang modules."
   :type 'list
   :group 'erlfs)
 
@@ -223,3 +225,23 @@ Value is non-nil if search is successful."
     (if (string= s "")
         nil
       (intern s))))
+
+(defun erlfs-find-callers ()
+  "Uses `grep` to find callers of the function at point."
+  (interactive)
+  (grep
+   (format
+    ;; regexp below:do not start line with "-" (directive like -spec),
+    ;; no line comment, match "Fun(" in local file; "Mod:Fun(" in other files,
+    ;; then highlight just Fun
+    (concat "(grep -nHE '^[^-][^%%]*[^\\w:]%s\\(' ./%s "
+            "; grep --include=\"*.erl\" -nrE '^[^-][^%%]*%s:%s\\(' %s )"
+            "| grep --color -w %s")
+    (symbol-at-point)
+    (file-name-nondirectory (buffer-file-name))
+    (erlang-get-module)
+    (symbol-at-point)
+    (string-join erlfs-search-patterns " ")
+    (symbol-at-point))))
+
+(provide 'erl-find-source)
