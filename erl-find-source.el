@@ -1,6 +1,12 @@
 ;;; This module implements find source for Erlang programs.
+
+;;; Author: Martin Bjorklund <mbj4668@gmail.com>
+
 ;;; Most of the code is copied from distel by Luke Gorrie,
-;;; but this version doesn't use an erlang node.
+;;; but this version doesn't use an erlang node to find the source files;
+;;; instead it searches the local filesystem.
+;;;
+;;; The code can find function, type, record and macro definitions.
 
 ;;; Usage example:
 ;;;
@@ -19,7 +25,7 @@
 
 (require 'erlang)
 
-;;;; Base framework
+;;; Base framework
 
 (defgroup erlfs '()
   "Erlang find source"
@@ -35,68 +41,66 @@
   :type 'list
   :group 'erlfs)
 
-;;;;; Call MFA lookup
+(defcustom erlfs-hrl-search-patterns '("../../*/include/")
+  "List of directory patterns to search for erlang include files."
+  :type 'list
+  :group 'erlfs)
 
-(defun erlfs-read-call-mfa ()
-  "Read module, function, arity at point or from user.
-Returns the result in a list: module and function as strings, arity as
-integer."
+;;;; Identifier reference lookup
+
+(defun erlfs-read-identifier-ref ()
+  "Read identifier reference at point or from user.
+Returns the result in a list."
   (interactive) ; for testing
-  (let* ((mfa-at-point (erlfs-mfa-at-point))
-         (mfa (if (or (null mfa-at-point)
-                      current-prefix-arg
-                      erlfs-tags-compliant)
-                  (erlfs-parse-mfa
-                   (read-string
-                    "Function reference: "
-                    (if current-prefix-arg nil
-                      (erlfs-format-mfa mfa-at-point))))
-                mfa-at-point)))
-    mfa))
+  (let* ((id-at-point (erlfs-get-identifier-at-point))
+         (id (if (or (null id-at-point)
+                     current-prefix-arg
+                     erlfs-tags-compliant)
+                 (erlfs-parse-mfa-as-id
+                  (read-string
+                   "Function reference: "
+                   (if current-prefix-arg nil
+                     (erlfs-format-mfa id-at-point))))
+               id-at-point)))
+    (list id)))
 
-(defun erlfs-format-mfa (mfa)
-  "Format (MOD FUN ARITY) as MOD:FUN/ARITY.
-If MFA is nil then return nil.
-If only MOD is nil then return FUN/ARITY."
-  (if mfa
-      (let ((m (car mfa))
-            (f (cadr mfa))
-            (a (caadr mfa)))
-        (if m (format "%s:%s/%S" m f a) (format "%s/%S" f a)))))
+;; Like erlang-get-identifier-at-point, but also handle arity in
+;; [mod:]func/arity
+(defun erlfs-get-identifier-at-point ()
+    (let ((id (erlang-get-identifier-at-point)))
+      (if (null (erlang-id-arity id))
+          (save-excursion
+            (erlfs-goto-end-of-call-name)
+            (let ((k (erlang-id-kind id))
+                  (m (erlang-id-module id))
+                  (n (erlang-id-name id))
+                  (a (erlfs-arity-at-point)))
+              (if a
+                  (list k m n a)
+                id)))
+        id)))
 
-(defun erlfs-parse-mfa (string &optional default-module)
-  "Parse MFA from a string using `erlfs-mfa-at-point'."
-  (when (null default-module) (setq default-module (erlfs-buffer-module-name)))
+(defun erlfs-format-mfa (id)
+  "Format as MOD:FUN/ARITY or return nil."
+  (if (and id (erlang-id-arity id))
+      (let ((m (or erlang-id-module) (erlang-get-module))
+            (f (erlang-id-name))
+            (a (erlang-id-arity)))
+        (format "%s:%s/%S" m f a))))
+
+(defun erlfs-parse-mfa-as-id (string)
   (with-temp-buffer
     (with-syntax-table erlang-mode-syntax-table
       (insert string)
       (goto-char (point-min))
-      (erlfs-mfa-at-point default-module))))
-
-(defun erlfs-buffer-module-name ()
-  "Return the current buffer's module name, or nil."
-  (erlang-get-module))
-
-(defun erlfs-mfa-at-point (&optional default-module)
-  "Return the module, function, arity of the function reference at point.
-If not module-qualified then use DEFAULT-MODULE."
-  (when (null default-module) (setq default-module (erlfs-buffer-module-name)))
-  (save-excursion
-    (erlfs-goto-end-of-call-name)
-    (let ((arity (erlfs-arity-at-point))
-          (mf (erlang-get-function-under-point)))
-      (if (null mf)
-          nil
-        (let ((m (car mf))
-              (f (cadr mf)))
-          (list (or m default-module) f arity))))))
+      (erlfs-get-identifier-at-point))))
 
 (defun erlfs-arity-at-point ()
   "Get the number of arguments in a function reference.
 Should be called with point directly before the opening ( or /."
   (save-excursion
     (cond ((looking-at "/")
-   ;; form is /<n>, like the /2 in foo:bar/2
+           ;; form is /<n>, like the /2 in foo:bar/2
            (forward-char)
            (let ((start (point)))
              (if (re-search-forward "[0-9]+" nil t)
@@ -111,8 +115,9 @@ Should be called with point directly before the opening ( or /."
   "History ring tracing for following functions to their definitions.")
 
 (defun erlfs-find-source-under-point ()
-  "Goto the source code that defines the function being called at point.
-For remote calls, it uses the following algorithm:
+  "Goto the source code that defines the identifier being referenced at point.
+
+For remote function calls, it uses the following algorithm:
 
   If a buffer exists with the name <module>.erl, goto that buffer.
 
@@ -130,7 +135,7 @@ is given, the user is prompted for the function to lookup (with a
 default.)"
   (interactive)
   (apply #'erlfs-find-source
-         (or (erlfs-read-call-mfa) (error "No call at point."))))
+         (or (erlfs-read-identifier-ref) (error "No call at point."))))
 
 (defun erlfs-find-source-unwind ()
   "Unwind back from uses of `erlfs-find-source-under-point'."
@@ -162,19 +167,17 @@ default.)"
   (when (eq (char-after) ?:)
     (forward-sexp)))
 
-(defun erlfs-find-source (module &optional function arity)
-  "Find the source code for MODULE in a buffer, loading it if necessary.
-When FUNCTION is specified, the point is moved to its start."
+(defun erlfs-find-source (id)
+  "Find the source code for ID in a buffer, loading it if necessary."
   ;; Add us to the history list
   (ring-insert-at-beginning erlfs-find-history-ring
                             (copy-marker (point-marker)))
-  (if (equal module (erlang-get-module))
-      (when function
-        (erlfs-search-function function arity))
-    (let ((buf (concat module ".erl")))
-      (if (erlfs-switch-to-module-buffer module)
-          (when function
-            (erlfs-search-function function arity))))))
+  (let ((module (erlang-id-module id)))
+    (cond ((or (null module) (equal module (erlang-get-module)))
+           (erlfs-search-identifier id))
+          (t (let ((buf (concat module ".erl")))
+               (if (erlfs-switch-to-module-buffer module)
+                   (erlfs-search-identifier id)))))))
 
 (defun erlfs-switch-to-module-buffer (module)
   (let ((fname (concat module ".erl")))
@@ -195,6 +198,20 @@ When FUNCTION is specified, the point is moved to its start."
                         (setq patterns (cdr patterns))))))
              found)))))
 
+(defun erlfs-search-identifier (id)
+  "Goto the definition of the identifier in the current buffer.
+Value is non-nil if search is successful."
+  (let ((kind (erlang-id-kind id))
+        (name (erlang-id-name id))
+        (arity (erlang-id-arity id)))
+    (cond
+     ((eq kind 'record)
+      (erlfs-search-record name))
+     ((eq kind 'macro)
+      (erlfs-search-macro name))
+     (t
+      (erlfs-search-function name arity)))))
+
 (defun erlfs-search-function (name arity &optional type)
   "Goto the definition of NAME/ARITY in the current buffer.
 Value is non-nil if search is successful."
@@ -214,24 +231,109 @@ Value is non-nil if search is successful."
                name arity)
       (erlfs-search-function name nil nil))
      ((not type)
-      (message "Searching type definition...")
       (erlfs-search-function name 0 t))
-     (t (message "Couldn't find function or type %S" name)
+     (t (message "Couldn't find definition %S" name)
         nil))))
 
-(defun erlfs-read-symbol-or-nil (prompt)
-  "Read a symbol, or NIL on empty input."
-  (let ((s (read-string prompt)))
-    (if (string= s "")
-        nil
-      (intern s))))
+(defun erlfs-search-record (name)
+  (erlfs-search-directive "record" 'record name))
+
+(defun erlfs-search-macro (name)
+  (erlfs-search-directive "define" 'macro name))
+
+(defun erlfs-search-directive (directive kind name)
+  (cond ((erlfs-search-local-directive directive name))
+        ((erlfs-search-remote-directive directive name))
+        (t (message "Couldn't find %s %S" kind name)
+           nil)))
+
+(defun erlfs-search-local-directive (directive name)
+  (let ((re (concat "^-" directive "\\s-*(" (regexp-quote name) "\\s-*[,(]"))
+        found)
+    (save-excursion
+      (goto-char (point-min))
+      (cond
+       ((re-search-forward re nil t)
+        (setq found (line-beginning-position)))))
+    (cond
+     (found (goto-char found)))))
+
+;; this function traverses all include and include_lib header files
+;; note: works only when the include/include_lib directive has a
+;; plain string argument, e.g., '-include("foo.hrl").'.  doesn't work
+;; if is uses macros, e.g., '-include(?MY_HRL)'
+(defun erlfs-search-remote-directive (directive name)
+  (let* ((hrl-files nil)
+         (file (erlfs-find-remote-directive-file directive name hrl-files)))
+    (if file
+        (progn
+          (find-file file)
+          (erlfs-search-local-directive directive name)))))
+
+(defun erlfs-find-remote-directive-file (directive name hrl-files)
+  ;; search all includes and include_libs in the local file
+  (let ((includes (erlfs-get-includes))
+        (found nil))
+    (while (and includes (not found))
+      (let* ((include (car includes))
+             (kind (car include))
+             (fname (cdr include)))
+        (if (and (not (file-exists-p fname))
+                 (eq kind 'include-lib))
+            ;; if fname exists, include_lib works like include
+            (progn
+              (if (null hrl-files) (setq hrl-files (erlfs-find-hrl-files)))
+              (setq fname (erlfs-get-hrl-file fname hrl-files))))
+        (setq includes (cdr includes))
+        (if (and fname (file-exists-p fname))
+            (with-temp-buffer
+              (insert-file-contents fname)
+              (cond ((erlfs-search-local-directive directive name)
+                     (setq found fname))
+                    (t (setq includes
+                             (append (erlfs-get-includes) includes))))))))
+    found))
+
+(defun erlfs-get-includes ()
+  (let (res)
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward "^-include" nil t)
+        (cond ((looking-at "(\"\\(.*\\)\")")
+               (setq res (cons (cons 'include (match-string-no-properties 1))
+                               res)))
+              ((looking-at "_lib(\"\\(.*\\)\")")
+               (setq res
+                     (cons (cons 'include-lib (match-string-no-properties 1))
+                           res))))))
+    res))
+
+(defun erlfs-find-hrl-files ()
+  (let (hrl-files)
+    (dolist (pattern
+             (append erlfs-search-patterns erlfs-hrl-search-patterns)
+             hrl-files)
+      (setq hrl-files
+            (append hrl-files
+                    (file-expand-wildcards (concat pattern "*.hrl")))))
+    (mapcar (lambda (fname)
+              (cons (file-name-nondirectory fname) fname))
+            hrl-files)))
+
+(defun erlfs-get-hrl-file (fname hrl-files)
+  (let* ((key (file-name-nondirectory fname))
+         (r (assoc key hrl-files)))
+    (if r (progn
+            ;; remove fname from hrl-files so that we don't test it again
+            (setq hrl-files (assoc-delete-all key hrl-files))
+            (cdr r)))))
 
 (defun erlfs-find-callers ()
   "Uses `grep` to find callers of the function at point."
   (interactive)
   (grep
    (format
-    ;; regexp below:do not start line with "-" (directive like -spec),
+    ;; regexp below: do not start line with "-" (directive like -spec),
     ;; no line comment, match "Fun(" in local file; "Mod:Fun(" in other files,
     ;; then highlight just Fun
     (concat "(grep -nHE '^[^-][^%%]*[^\\w:]%s\\(' ./%s "
