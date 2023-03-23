@@ -331,6 +331,7 @@ Value is non-nil if search is successful."
 (defun erlfs-find-callers ()
   "Uses `grep` to find callers of the function at point."
   (interactive)
+  (setq grep-use-null-device nil)
   (grep
    (format
     ;; regexp below: do not start line with "-" (directive like -spec),
