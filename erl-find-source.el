@@ -6,7 +6,8 @@
 ;;; but this version doesn't use an erlang node to find the source files;
 ;;; instead it searches the local filesystem.
 ;;;
-;;; The code can find function, type, record and macro definitions.
+;;; The code can find function, type, record and macro definitions,
+;;; and callers of a function.
 
 ;;; Usage example:
 ;;;
@@ -331,7 +332,7 @@ Value is non-nil if search is successful."
 (defun erlfs-find-callers ()
   "Uses `grep` to find callers of the function at point."
   (interactive)
-  (setq grep-use-null-device nil)
+  (grep-apply-setting 'grep-use-null-device nil)
   (grep
    (format
     ;; regexp below: do not start line with "-" (directive like -spec),
